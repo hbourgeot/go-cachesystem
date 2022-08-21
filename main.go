@@ -2,73 +2,85 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
 )
 
-func Fibonacci(n int) int {
+func ExpensiveFibonacci(n int) int {
 	if n <= 1 {
+		time.Sleep(5 * time.Second)
 		return n
 	}
-	return Fibonacci(n-1) + Fibonacci(n-2)
+	return ExpensiveFibonacci(n-1) + ExpensiveFibonacci(n-2)
 }
 
-type Memory struct {
-	f     Function
-	cache map[int]FunctionResult
-	lock  sync.Mutex
+type Service struct {
+	InProgress map[int]bool
+	IsPending  map[int][]chan int
+	Lock       sync.RWMutex
 }
 
-type Function func(key int) (interface{}, error)
+func (s *Service) Work(job int) {
+	s.Lock.RLock()
+	exists := s.InProgress[job]
+	if exists {
+		s.Lock.RUnlock()
+		response := make(chan int)
+		defer close(response)
 
-type FunctionResult struct {
-	value interface{}
-	err   error
-}
+		s.Lock.Lock()
+		s.IsPending[job] = append(s.IsPending[job], response)
+		s.Lock.Unlock()
 
-func NewCache(f Function) *Memory {
-	return &Memory{
-		f:     f,
-		cache: make(map[int]FunctionResult),
-	}
-}
-
-func (m *Memory) Get(key int) (interface{}, error) {
-	m.lock.Lock()
-	result, exists := m.cache[key]
-	m.lock.Unlock()
-
-	if !exists {
-		m.lock.Lock()
-		result.value, result.err = m.f(key)
-		m.cache[key] = result
-		m.lock.Unlock()
+		fmt.Printf("Waiting for response job: %d\n", job)
+		res := <-response
+		fmt.Printf("REsponse done, received %d\n", res)
+		return
 	}
 
-	return result.value, result.err
+	s.Lock.RUnlock()
+
+	s.Lock.Lock()
+	s.InProgress[job] = true
+	s.Lock.Unlock()
+
+	fmt.Printf("Calculate fibonacci for %d\n", job)
+	result := ExpensiveFibonacci(job)
+
+	s.Lock.RLock()
+	pendingWorkers, exists := s.IsPending[job]
+	s.Lock.RUnlock()
+
+	if exists {
+		for _, pendingWorker := range pendingWorkers {
+			pendingWorker <- result
+		}
+
+		fmt.Printf("Result sent - all pending workers ready job: %d\n", job)
+	}
+
+	s.Lock.Lock()
+	s.InProgress[job] = false
+	s.IsPending[job] = make([]chan int, 0)
+	s.Lock.Unlock()
 }
 
-func GetFibonacci(n int) (interface{}, error) {
-	return Fibonacci(n), nil
+func NewService() *Service {
+	return &Service{
+		InProgress: make(map[int]bool),
+		IsPending:  make(map[int][]chan int),
+	}
 }
 
 func main() {
-	cache := NewCache(GetFibonacci)
-	fibo := []int{42, 40, 41, 42, 38}
+	service := NewService()
+	jobs := []int{3, 4, 5, 5, 4, 8, 8, 8}
 	var wg sync.WaitGroup
-
-	for _, n := range fibo {
-		wg.Add(1)
-		go func(index int) {
+	wg.Add(len(jobs))
+	for _, n := range jobs {
+		go func(job int) {
 			defer wg.Done()
-			start := time.Now()
-			value, err := cache.Get(index)
-			if err != nil {
-				log.Println(err)
-			}
-
-			fmt.Printf("%d, %s ,%d\n", index, time.Since(start), value)
+			service.Work(job)
 		}(n)
 	}
 	wg.Wait()
